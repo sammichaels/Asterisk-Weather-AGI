@@ -1,0 +1,106 @@
+#!/bin/bash
+#
+# Interpret METAR data for Weather in Touch
+# Sam Michaels 1/9/13
+#############################################
+
+# Read the data from Asterisk...
+
+declare -a array
+while read -e ARG && [ "$ARG" ] ; do
+        array=(` echo $ARG | sed -e 's/://'`)
+        export ${array[0]}=${array[1]}
+done
+
+#############################################
+# These variables are set from Asterisk
+#
+# Maybe do NPA/NXX lookup to get area
+# specific wx info?
+#
+# $agi_request
+# $agi_channel
+# $agi_language
+# $agi_type
+# $agi_uniqueid
+# $agi_callerid
+# $agi_dnid
+# $agi_rdnis
+# $agi_context
+# $agi_extension
+# $agi_priority
+# $agi_enhanced
+#############################################
+
+
+# Asterisk will echo the result back to us.
+# This script doesn't do anything, but you
+# could check for a result...
+checkresults() {
+        while read line
+        do
+        case ${line:0:4} in
+        "200 " ) echo $line >&2
+                 return;;
+        "510 " ) echo $line >&2
+                 return;;
+        "520 " ) echo $line >&2
+                 return;;
+        *      ) echo $line >&2;;
+        esac
+        done
+}
+
+
+metar=`curl -s -m 3 http://w1.weather.gov/data/METAR/KDAL.1.txt`
+
+# If the web retrieval fails, bail and don't announce anything
+if [ $? -ne 0 ]; then exit; fi
+
+# Set the main vars while looking for TXXXXXXXX
+temp=`echo "$metar" | grep -o -P 'T[01]\d{3}[01]\d{3}' | cut -c3-5`
+dew=`echo "$metar" | grep -o -P 'T[01]\d{3}[01]\d{3}' | cut -c7-9`
+tempminus=`echo "$metar" | grep -o -P 'T[01]\d{3}[01]\d{3}' | cut -c2`
+dewminus=`echo "$metar" | grep -o -P 'T[01]\d{3}[01]\d{3}' | cut -c6`
+
+# Correct for leading 0 which screws up the math operands
+if [ `expr "$temp" : '0'` -eq 1 ]; then temp=`echo "$temp" | cut -c2-`; fi
+if [ `expr "$dew" : '0'` -eq 1 ]; then dew=`echo "$dew" | cut -c2-`; fi
+
+# Need to calculate E and Es for humidity
+# Vapor pressure E = 6.11*10^(7.5*Td/(237.7+Td))
+# Saturation vapor pressure Es = 6.11*10^(7.5*Tc/(237.7+Tc))
+
+humidity=`echo "$temp $dew $tempminus $dewminus" | awk \
+  '{ t = $1 * 0.1; d = $2 * 0.1
+  if ($3 == 1) t=t*-1; if ($4 == 1) d=d*-1
+  e = 6.11*10^(7.5*d/(237.7+d))
+  es = 6.11*10^(7.5*t/(237.7+t)); hum = 100 * (e / es)
+  print int(hum) }'`
+
+# Convert celsius
+temp=`echo "$temp $tempminus" | awk '{ \
+  if ($2 == 1) t=$1*-1*0.1; else t = $1*0.1
+  print int(t*1.8+32)}'`
+
+# Check for negative temperature
+if [ $temp -lt 0 ]; then minus=1; temp=$(($temp * -1)); else minus=0; fi
+
+# Output to Asterisk
+echo "STREAM FILE temperature \"\""
+checkresults
+echo "STREAM FILE is-currently \"\""
+checkresults
+if [ $minus -eq 1 ]; then echo "STREAM FILE minus \"\""; checkresults; fi
+echo "SAY NUMBER $temp \"\""
+checkresults
+echo "STREAM FILE degrees \"\""
+checkresults
+echo "STREAM FILE with \"\""
+checkresults
+echo "SAY NUMBER $humidity \"\""
+checkresults
+echo "STREAM FILE percent \"\""
+checkresults
+echo "STREAM FILE humidity \"\""
+checkresults
